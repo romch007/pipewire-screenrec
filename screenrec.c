@@ -245,12 +245,15 @@ stoploop:
 }
 
 static void on_screencast_session_created(GObject *src, GAsyncResult *res, gpointer data) {
+    struct AppContext *ctx = data;
+
     GError *error = NULL;
     XdpSession *session = xdp_portal_create_screencast_session_finish(XDP_PORTAL(src), res, &error);
 
     if (error != NULL) {
-        g_warning("Failed to create screencast session: %s", error->message);
+        fprintf(stderr, "Failed to create screencast session: %s", error->message);
         g_error_free(error);
+        g_main_loop_quit(ctx->gloop);
         return;
     }
 
