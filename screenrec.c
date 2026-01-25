@@ -33,29 +33,19 @@ struct AppContext {
 
 static struct AppContext *g_ctx = NULL;
 
-static void upper_str(char *s) {
-    if (!s)
-        return;
-
-    while (*s) {
-        *s = toupper((unsigned char) *s);
-        s++;
-    }
+static void fputs_upper(FILE *out, const char *s) {
+    for (; *s; ++s)
+        fputc(toupper((unsigned char) *s), out);
 }
 
 static void on_pw_stream_state_changed(void *data, enum pw_stream_state old, enum pw_stream_state state, const char *error) {
     struct AppContext *ctx = data;
 
-    char *old_state = strdup(pw_stream_state_as_string(old));
-    char *new_state = strdup(pw_stream_state_as_string(state));
-
-    upper_str(old_state);
-    upper_str(new_state);
-
-    fprintf(stderr, "State changed: %s -> %s\n", old_state, new_state);
-
-    free(old_state);
-    free(new_state);
+    fprintf(stderr, "State changed: ");
+    fputs_upper(stderr, pw_stream_state_as_string(old));
+    fprintf(stderr, " -> ");
+    fputs_upper(stderr, pw_stream_state_as_string(state));
+    fprintf(stderr, "\n");
 
     if (error)
         fprintf(stderr, "Pipewire error: %s\n", error);
