@@ -13,6 +13,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#define COUNT_OF(x) (sizeof(x) / sizeof(x[0]))
+
 struct AppContext {
     GMainLoop *gloop;
     XdpSession *screencast_session;
@@ -194,7 +196,6 @@ static void setup_pw_stream(struct AppContext *ctx) {
     const struct spa_pod *param = build_format_params(&b);
 
     const struct spa_pod *params[1] = {param};
-    uint32_t n_params = sizeof(params) / sizeof(params[0]);
 
     pw_stream_connect(
             ctx->stream,
@@ -202,7 +203,7 @@ static void setup_pw_stream(struct AppContext *ctx) {
             ctx->node_id,
             PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_AUTOCONNECT,
             params,
-            n_params);
+            COUNT_OF(params));
 }
 
 static guint get_first_node_id(GVariant *streams) {
