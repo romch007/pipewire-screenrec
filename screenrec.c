@@ -1,7 +1,11 @@
 #include <ctype.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
 #include <libportal/portal.h>
 #include <pipewire/pipewire.h>
-#include <signal.h>
 #include <spa/debug/pod.h>
 #include <spa/debug/types.h>
 #include <spa/param/format-utils.h>
@@ -9,13 +13,10 @@
 #include <spa/param/video/raw-utils.h>
 #include <spa/param/video/raw.h>
 #include <spa/utils/result.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
 
 #define COUNT_OF(x) (sizeof(x) / sizeof(x[0]))
 
-struct AppContext {
+struct context {
     GMainLoop *gloop;
     XdpSession *screencast_session;
     int pipewire_fd;
@@ -31,7 +32,7 @@ struct AppContext {
     bool write_output;
 };
 
-static struct AppContext *g_ctx = NULL;
+static struct context *g_ctx = NULL;
 
 static void fputs_upper(FILE *out, const char *s) {
     for (; *s; ++s)
@@ -39,7 +40,7 @@ static void fputs_upper(FILE *out, const char *s) {
 }
 
 static void on_pw_stream_state_changed(void *data, enum pw_stream_state old, enum pw_stream_state state, const char *error) {
-    struct AppContext *ctx = data;
+    struct context *ctx = data;
 
     fprintf(stderr, "State changed: ");
     fputs_upper(stderr, pw_stream_state_as_string(old));
@@ -64,7 +65,7 @@ static void on_pw_param_changed(
         void *data,
         uint32_t id,
         const struct spa_pod *param) {
-    struct AppContext *ctx = data;
+    struct context *ctx = data;
 
     if (!param || id != SPA_PARAM_Format)
         return;
@@ -75,29 +76,32 @@ static void on_pw_param_changed(
     if (spa_format_parse(param, &info.media_type, &info.media_subtype) < 0)
         return;
 
-    if (info.media_type == SPA_MEDIA_TYPE_video &&
-        info.media_subtype == SPA_MEDIA_SUBTYPE_raw) {
+    if (info.media_type != SPA_MEDIA_TYPE_video ||
+        info.media_subtype != SPA_MEDIA_SUBTYPE_raw)
+        return;
 
-        struct spa_video_info_raw raw;
-        spa_format_video_raw_parse(param, &raw);
+    struct spa_video_info_raw raw;
+    spa_format_video_raw_parse(param, &raw);
 
-        ctx->video_info = raw;
+    ctx->video_info = raw;
 
-        fprintf(stderr, "Video format:\n");
-        fprintf(stderr, "  Size: %dx%d\n", raw.size.width, raw.size.height);
-        fprintf(stderr, "  Framerate: %d/%d\n",
-                raw.framerate.num, raw.framerate.denom);
-        fprintf(stderr, "  Pixel format: %s\n",
-                spa_debug_type_find_name(spa_type_video_format, raw.format));
-    }
+    fprintf(stderr, "Video format:\n");
+    fprintf(stderr, "  Size: %dx%d\n", raw.size.width, raw.size.height);
+    fprintf(stderr, "  Framerate: %d/%d\n",
+            raw.framerate.num, raw.framerate.denom);
+    fprintf(stderr, "  Pixel format: %s\n",
+            spa_debug_type_find_name(spa_type_video_format, raw.format));
 }
 
 static void on_pw_stream_process(void *data) {
-    struct AppContext *ctx = data;
+    struct context *ctx = data;
 
-    struct pw_buffer *buf = pw_stream_dequeue_buffer(ctx->stream);
-    if (!buf)
+    struct pw_buffer *buf;
+
+    if ((buf = pw_stream_dequeue_buffer(ctx->stream)) == NULL) {
+        pw_log_warn("Out of buffers: %m");
         return;
+    }
 
     const struct spa_buffer *spa_buf = buf->buffer;
 
@@ -159,7 +163,7 @@ static void do_quit(int sig) {
     pw_main_loop_quit(g_ctx->main_loop);
 }
 
-static void setup_pw_stream(struct AppContext *ctx) {
+static void setup_pw_stream(struct context *ctx) {
     ctx->main_loop = pw_main_loop_new(NULL);
 
     g_ctx = ctx;
@@ -187,63 +191,63 @@ static void setup_pw_stream(struct AppContext *ctx) {
 
     const struct spa_pod *params[1] = {param};
 
-    pw_stream_connect(
-            ctx->stream,
-            PW_DIRECTION_INPUT,
-            ctx->node_id,
-            PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_AUTOCONNECT,
-            params,
-            COUNT_OF(params));
+    int ret;
+    if ((ret = pw_stream_connect(
+                 ctx->stream,
+                 PW_DIRECTION_INPUT,
+                 ctx->node_id,
+                 PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_AUTOCONNECT,
+                 params,
+                 COUNT_OF(params)))) {
+        fprintf(stderr, "Failed to connect pipewire stream: %s", spa_strerror(ret));
+    }
 }
 
 static guint get_first_node_id(GVariant *streams) {
     if (!streams)
         return 0;
 
-    GVariant *first = g_variant_get_child_value(streams, 0);
+    g_autoptr(GVariant) first = g_variant_get_child_value(streams, 0);
     if (!first)
         return 0;
 
     guint node_id;
     g_variant_get(first, "(u@a{sv})", &node_id, NULL);
-    g_variant_unref(first);
 
     return node_id;
 }
 
 static void on_screencast_session_started(GObject *src, GAsyncResult *res, gpointer data) {
-    struct AppContext *ctx = data;
+    struct context *ctx = data;
 
     ctx->screencast_session = XDP_SESSION(src);
 
-    GError *error = NULL;
+    g_autoptr(GError) error = NULL;
     xdp_session_start_finish(ctx->screencast_session, res, &error);
+
     if (error != NULL) {
         fprintf(stderr, "Failed to start screencast session: %s\n", error->message);
-        g_error_free(error);
-        goto stoploop;
+        g_main_loop_quit(ctx->gloop);
+        return;
     }
 
-    GVariant *streams = xdp_session_get_streams(ctx->screencast_session);
+    g_autoptr(GVariant) streams = xdp_session_get_streams(ctx->screencast_session);
     ctx->node_id = get_first_node_id(streams);
-    g_variant_unref(streams);
 
     ctx->pipewire_fd = xdp_session_open_pipewire_remote(ctx->screencast_session);
     setup_pw_stream(ctx);
 
-stoploop:
     g_main_loop_quit(ctx->gloop);
 }
 
 static void on_screencast_session_created(GObject *src, GAsyncResult *res, gpointer data) {
-    struct AppContext *ctx = data;
+    struct context *ctx = data;
 
-    GError *error = NULL;
-    XdpSession *session = xdp_portal_create_screencast_session_finish(XDP_PORTAL(src), res, &error);
+    g_autoptr(GError) error = NULL;
+    g_autoptr(XdpSession) session = xdp_portal_create_screencast_session_finish(XDP_PORTAL(src), res, &error);
 
     if (error != NULL) {
         fprintf(stderr, "Failed to create screencast session: %s", error->message);
-        g_error_free(error);
         g_main_loop_quit(ctx->gloop);
         return;
     }
@@ -261,16 +265,17 @@ int main(int argc, char *argv[]) {
             pw_get_headers_version(),
             pw_get_library_version());
 
-    struct AppContext ctx = {0};
+    struct context ctx = {0};
 
     if (isatty(STDOUT_FILENO))
         fprintf(stderr, "Warning: stdout is a tty, frames will not be outputted to it\n");
     else
         ctx.write_output = true;
 
-    XdpPortal *portal = xdp_portal_new();
+    g_autoptr(XdpPortal) portal = xdp_portal_new();
+    g_autoptr(GMainLoop) gloop = g_main_loop_new(NULL, FALSE);
 
-    ctx.gloop = g_main_loop_new(NULL, FALSE);
+    ctx.gloop = gloop;
 
     xdp_portal_create_screencast_session(
             portal,
@@ -283,10 +288,7 @@ int main(int argc, char *argv[]) {
             on_screencast_session_created,
             &ctx);
 
-    g_object_unref(portal);
-
     g_main_loop_run(ctx.gloop);
-    g_main_loop_unref(ctx.gloop);
 
     if (ctx.pipewire_fd <= 0)
         return 1;
