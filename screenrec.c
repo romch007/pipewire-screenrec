@@ -49,7 +49,7 @@ static void on_pw_stream_state_changed(void *data, enum pw_stream_state old, enu
     fprintf(stderr, "\n");
 
     if (error)
-        fprintf(stderr, "Pipewire error: %s\n", error);
+        fprintf(stderr, "PipeWire error: %s\n", error);
 
     switch (state) {
         case PW_STREAM_STATE_ERROR:
@@ -198,9 +198,8 @@ static void setup_pw_stream(struct context *ctx) {
                  ctx->node_id,
                  PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_AUTOCONNECT,
                  params,
-                 COUNT_OF(params)))) {
-        fprintf(stderr, "Failed to connect pipewire stream: %s", spa_strerror(ret));
-    }
+                 COUNT_OF(params))))
+        fprintf(stderr, "Failed to connect pipewire stream: %s\n", spa_strerror(ret));
 }
 
 static guint get_first_node_id(GVariant *streams) {
@@ -247,7 +246,7 @@ static void on_screencast_session_created(GObject *src, GAsyncResult *res, gpoin
     g_autoptr(XdpSession) session = xdp_portal_create_screencast_session_finish(XDP_PORTAL(src), res, &error);
 
     if (error != NULL) {
-        fprintf(stderr, "Failed to create screencast session: %s", error->message);
+        fprintf(stderr, "Failed to create screencast session: %s\n", error->message);
         g_main_loop_quit(ctx->gloop);
         return;
     }
@@ -299,10 +298,14 @@ int main(int argc, char *argv[]) {
         pw_stream_disconnect(ctx.stream);
         pw_stream_destroy(ctx.stream);
     }
+    if (ctx.core)
+        pw_core_disconnect(ctx.core);
     if (ctx.context)
         pw_context_destroy(ctx.context);
     if (ctx.main_loop)
         pw_main_loop_destroy(ctx.main_loop);
+    if (ctx.pipewire_fd > 0)
+        close(ctx.pipewire_fd);
 
     pw_deinit();
     return 0;
