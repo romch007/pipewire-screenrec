@@ -105,8 +105,9 @@ static void on_pw_stream_process(void *data) {
 
     const struct spa_buffer *spa_buf = buf->buffer;
 
-    void *video_data = spa_buf->datas[0].data;
-    const size_t size = spa_buf->datas[0].maxsize;
+    const struct spa_chunk *chunk = spa_buf->datas[0].chunk;
+    void *video_data = (uint8_t *) spa_buf->datas[0].data + chunk->offset;
+    const size_t size = chunk->size;
 
     if (ctx->write_output)
         write(STDOUT_FILENO, video_data, size);
