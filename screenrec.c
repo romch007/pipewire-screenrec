@@ -158,7 +158,7 @@ static struct spa_pod *build_format_params(struct spa_pod_builder *b) {
 }
 
 static void do_quit(int sig) {
-    fprintf(stderr, "Stopping...\n");
+    fprintf(stderr, "Received %s, stopping...\n", strsignal(sig));
 
     pw_main_loop_quit(g_ctx->main_loop);
 }
