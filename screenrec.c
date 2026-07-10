@@ -1,4 +1,5 @@
 #include <ctype.h>
+#include <errno.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -86,8 +87,8 @@ static void on_pw_param_changed(
     ctx->video_info = raw;
 
     fprintf(stderr, "Video format:\n");
-    fprintf(stderr, "  Size: %dx%d\n", raw.size.width, raw.size.height);
-    fprintf(stderr, "  Framerate: %d/%d\n",
+    fprintf(stderr, "  Size: %ux%u\n", raw.size.width, raw.size.height);
+    fprintf(stderr, "  Framerate: %u/%u\n",
             raw.framerate.num, raw.framerate.denom);
     fprintf(stderr, "  Pixel format: %s\n",
             spa_debug_type_find_name(spa_type_video_format, raw.format));
@@ -106,11 +107,23 @@ static void on_pw_stream_process(void *data) {
     const struct spa_buffer *spa_buf = buf->buffer;
 
     const struct spa_chunk *chunk = spa_buf->datas[0].chunk;
-    void *video_data = (uint8_t *) spa_buf->datas[0].data + chunk->offset;
-    const size_t size = chunk->size;
+    const uint8_t *video_data = (const uint8_t *) spa_buf->datas[0].data;
 
-    if (ctx->write_output)
-        write(STDOUT_FILENO, video_data, size);
+    if (ctx->write_output && video_data != NULL) {
+        const uint8_t *p = video_data + chunk->offset;
+        size_t remaining = chunk->size;
+
+        while (remaining > 0) {
+            ssize_t written = write(STDOUT_FILENO, p, remaining);
+            if (written < 0) {
+                fprintf(stderr, "Failed to write frame: %s\n", strerror(errno));
+                pw_main_loop_quit(ctx->main_loop);
+                break;
+            }
+            p += written;
+            remaining -= (size_t) written;
+        }
+    }
 
     pw_stream_queue_buffer(ctx->stream, buf);
 }
@@ -164,8 +177,17 @@ static void do_quit(int sig) {
     pw_main_loop_quit(g_ctx->main_loop);
 }
 
-static void setup_pw_stream(struct context *ctx) {
+static bool setup_pw_stream(struct context *ctx) {
+    if (ctx->node_id == 0) {
+        fprintf(stderr, "No screencast stream available\n");
+        return false;
+    }
+
     ctx->main_loop = pw_main_loop_new(NULL);
+    if (ctx->main_loop == NULL) {
+        fprintf(stderr, "Failed to create pipewire main loop\n");
+        return false;
+    }
 
     g_ctx = ctx;
 
@@ -173,8 +195,16 @@ static void setup_pw_stream(struct context *ctx) {
     signal(SIGINT, do_quit);
 
     ctx->context = pw_context_new(pw_main_loop_get_loop(ctx->main_loop), NULL, 0);
+    if (ctx->context == NULL) {
+        fprintf(stderr, "Failed to create pipewire context\n");
+        return false;
+    }
 
     ctx->core = pw_context_connect_fd(ctx->context, ctx->pipewire_fd, NULL, 0);
+    if (ctx->core == NULL) {
+        fprintf(stderr, "Failed to connect to pipewire: %s\n", strerror(errno));
+        return false;
+    }
 
     struct pw_properties *props = pw_properties_new(
             PW_KEY_MEDIA_TYPE, "Video",
@@ -183,6 +213,10 @@ static void setup_pw_stream(struct context *ctx) {
             NULL);
 
     ctx->stream = pw_stream_new(ctx->core, "screenrec", props);
+    if (ctx->stream == NULL) {
+        fprintf(stderr, "Failed to create pipewire stream\n");
+        return false;
+    }
 
     pw_stream_add_listener(ctx->stream, &ctx->stream_listener, &stream_events, ctx);
 
@@ -199,8 +233,12 @@ static void setup_pw_stream(struct context *ctx) {
                  ctx->node_id,
                  PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_AUTOCONNECT,
                  params,
-                 COUNT_OF(params))))
+                 COUNT_OF(params)))) {
         fprintf(stderr, "Failed to connect pipewire stream: %s\n", spa_strerror(ret));
+        return false;
+    }
+
+    return true;
 }
 
 static guint get_first_node_id(GVariant *streams) {
@@ -235,7 +273,12 @@ static void on_screencast_session_started(GObject *src, GAsyncResult *res, gpoin
     ctx->node_id = get_first_node_id(streams);
 
     ctx->pipewire_fd = xdp_session_open_pipewire_remote(ctx->screencast_session);
-    setup_pw_stream(ctx);
+
+    if (!setup_pw_stream(ctx)) {
+        if (ctx->pipewire_fd >= 0)
+            close(ctx->pipewire_fd);
+        ctx->pipewire_fd = -1;
+    }
 
     g_main_loop_quit(ctx->gloop);
 }
@@ -266,6 +309,7 @@ int main(int argc, char *argv[]) {
             pw_get_library_version());
 
     struct context ctx = {0};
+    ctx.pipewire_fd = -1;
 
     if (isatty(STDOUT_FILENO))
         fprintf(stderr, "Warning: stdout is a tty, frames will not be outputted to it\n");
@@ -290,7 +334,7 @@ int main(int argc, char *argv[]) {
 
     g_main_loop_run(ctx.gloop);
 
-    if (ctx.pipewire_fd <= 0)
+    if (ctx.pipewire_fd < 0)
         return 1;
 
     pw_main_loop_run(ctx.main_loop);
@@ -305,7 +349,7 @@ int main(int argc, char *argv[]) {
         pw_context_destroy(ctx.context);
     if (ctx.main_loop)
         pw_main_loop_destroy(ctx.main_loop);
-    if (ctx.pipewire_fd > 0)
+    if (ctx.pipewire_fd >= 0)
         close(ctx.pipewire_fd);
 
     pw_deinit();
